@@ -1,0 +1,698 @@
+# Архитектурная спецификация проекта (Технический дизайн)
+
+Документ описывает целевую архитектуру двухсервисной системы LLM-консультаций для мессенджера MAX и синхронизирован с `ТЗ_МАКС.txt`.
+
+Ключевое уточнение относительно базового текста ТЗ: Bot Service не хранит JWT целиком в Redis под `token:<id>`. Вместо этого используется двунаправленный Redis-маппинг `max_auth:<max_user_id>` / `user_chat:<sub>` с TTL от `exp` JWT. Celery-воркер не вызывает MAX Bot API и не импортирует `maxapi`; доставка сообщений в MAX выполняется только компонентом Response Sender внутри Bot Service через очередь `max:outbox`.
+
+## Согласованные отклонения от базового ТЗ
+
+| Пункт базового ТЗ | Утвержденная реализация | Причина |
+|-------------------|--------------------------|---------|
+| Единый ключ `token:<id>` для хранения авторизации в Redis | Двунаправленный маппинг `max_auth:<max_user_id>` + `user_chat:<sub>` (TTL = `exp`) | Нужна корректная инвалидация старых связей при повторной авторизации в другом чате/под другим пользователем |
+| Сигнатура `llm_request(max_user_id, prompt)` и отправка в MAX из worker | `llm_request(sub, role, prompt)` + публикация в `max:outbox` | Worker изолирован от MAX API, маршрут доставки получается через `user_chat:<sub>` |
+
+Терминология в проекте стандартизирована: вместо "токен в Redis" используем "auth-состояние в `max_auth`/`user_chat`".
+
+## Общая архитектура
+
+### 1. Контракты между сервисами и компонентами
+
+#### Контракт Auth Service -> Bot Service через JWT
+
+```python
+# JWT Payload interface
+interface JWTToken:
+    sub: str          # user_id в Auth Service
+    role: str         # "user" | "admin"
+    iat: int          # issued at, Unix timestamp
+    exp: int          # expires at, Unix timestamp
+```
+
+Обязательные правила:
+
+- JWT выпускается только Auth Service.
+- Bot Service только валидирует JWT, но не создаёт его.
+- Bot Service не вызывает Auth Service напрямую.
+- В учебной версии используется общий секрет `JWT_SECRET` и алгоритм `HS256`.
+
+#### Контракт Bot Service -> Redis
+
+```python
+interface RedisState:
+    # Прямой маппинг: актуальная авторизация MAX-чата
+    key: f"max_auth:{max_user_id}"
+    ttl: exp JWT
+    value: JSON{"sub": str, "role": str}
+
+    # Обратный маппинг: актуальный чат пользователя Auth Service
+    key: f"user_chat:{sub}"
+    ttl: exp JWT
+    value: str  # max_user_id
+
+    # Исходящая очередь сообщений в MAX
+    key: "max:outbox"
+    type: Redis LIST
+    ttl: none
+    value: JSON{
+        "max_user_id": str,
+        "text": str,
+        "task_id": str,
+        "created_at": float
+    }
+```
+
+Redis не хранит:
+
+- JWT целиком.
+- Пароли пользователей.
+- Логи переписки, если это не добавлено отдельным требованием.
+
+#### Контракт Bot Service -> Celery -> Redis
+
+```python
+# Celery Task signature
+interface LLMTask:
+    args: (sub: str, role: str, prompt: str)
+    result: None
+    side_effect: RPUSH "max:outbox" <OutboxItem JSON>
+```
+
+Причина передачи `sub`, а не `max_user_id`: маршрут доставки определяется через Redis `user_chat:<sub>`, чтобы Celery-воркер не зависел от MAX API и не знал деталей платформы доставки.
+
+#### Контракт Response Sender -> MAX API
+
+Response Sender работает внутри Bot Service, читает `max:outbox` через `BLPOP` и вызывает `maxapi Bot.send_message`.
+
+MAX API разрешено вызывать только из Bot Service:
+
+- handlers могут отвечать пользователю на входящие события;
+- Response Sender доставляет ответы LLM из outbox;
+- Celery Worker не импортирует `maxapi` и не вызывает MAX Bot API.
+
+## 2. Диаграмма последовательности
+
+```text
+Пользователь    Auth Service    Bot Service    Redis        Celery        OpenRouter    MAX API
+    │                │              │            │             │              │            │
+    │ POST /register │              │            │             │              │            │
+    ├───────────────>│              │            │             │              │            │
+    │                │              │            │             │              │            │
+    │ POST /login    │              │            │             │              │            │
+    ├───────────────>│              │            │             │              │            │
+    │<───────────────┤              │            │             │              │            │
+    │      JWT       │              │            │             │              │            │
+    │                │              │            │             │              │            │
+    │ /token <JWT>   │              │            │             │              │            │
+    ├──────────────────────────────>│            │             │              │            │
+    │                │              │ validate JWT             │              │            │
+    │                │              │ GET user_chat:<sub>      │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │ DEL max_auth:<old_chat>  │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │ GET max_auth:<chat>      │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │ DEL user_chat:<old_sub>  │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │ SETEX max_auth:<chat>    │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │ SETEX user_chat:<sub>    │              │            │
+    │                │              ├───────────>│             │              │            │
+    │<──────────────────────────────┤            │             │              │            │
+    │ "Токен сохранён"              │            │             │              │            │
+    │                │              │            │             │              │            │
+    │ "Привет, LLM!" │              │            │             │              │            │
+    ├──────────────────────────────>│            │             │              │            │
+    │                │              │ GET max_auth:<chat>      │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │<───────────┤             │              │            │
+    │                │              │ sub, role  │             │              │            │
+    │                │              │ celery.delay(sub,role,prompt)          │            │
+    │                │              ├──────────────────────────>│             │            │
+    │<──────────────────────────────┤            │             │              │            │
+    │ "Запрос принят"               │            │             │              │            │
+    │                │              │            │             │              │            │
+    │                │              │            │             │ POST /chat/completions     │
+    │                │              │            │             ├─────────────>│            │
+    │                │              │            │             │<─────────────┤            │
+    │                │              │            │             │ response     │            │
+    │                │              │            │ GET user_chat:<sub>        │            │
+    │                │              │            │<────────────┤              │            │
+    │                │              │            │ max_user_id │              │            │
+    │                │              │            │ RPUSH max:outbox           │            │
+    │                │              │            │<────────────┤              │            │
+    │                │              │            │             │              │            │
+    │                │              │ BLPOP max:outbox          │              │            │
+    │                │              ├───────────>│             │              │            │
+    │                │              │<───────────┤             │              │            │
+    │                │              │ send_message(chat_id,text)             │            │
+    │                │              ├─────────────────────────────────────────────────────>│
+    │<─────────────────────────────────────────────────────────────────────────────────────┤
+    │ Ответ LLM                                                                         │
+```
+
+## 3. Схема данных
+
+| Компонент | Хранилище | Данные | TTL | Ключ |
+|-----------|-----------|--------|-----|------|
+| Auth Service | SQLite/Postgres | users: id, email, password_hash, role, created_at | бессрочно | id/email |
+| Bot Service | Redis | sub, role для max_user_id | exp JWT | `max_auth:{max_user_id}` |
+| Bot Service | Redis | max_user_id для sub | exp JWT | `user_chat:{sub}` |
+| Bot Service | Redis LIST | исходящие сообщения | до извлечения | `max:outbox` |
+| Celery | RabbitMQ | задачи `llm_request` | до обработки | очередь Celery |
+| Celery | Redis backend | статусы задач | опционально | `celery-task-meta-*` |
+
+Redis backend для Celery опционален. Обязательная доставка результата пользователю идёт через Redis LIST `max:outbox`; result backend можно включить для мониторинга и отладки.
+
+## 4. Протоколы взаимодействия
+
+| A -> B | Протокол | Данные | Порт/URL |
+|--------|----------|--------|----------|
+| Пользователь -> Auth Service | HTTP/HTTPS FastAPI | JSON/form-data | 8000 |
+| Пользователь -> Bot Service | MAX Bot API | события MAX | зависит от режима MAX |
+| Bot Service -> Redis | RESP, redis-py | SETEX/GET/DEL/BLPOP | 6379 |
+| Bot Service -> Celery/RabbitMQ | AMQP | Celery task | 5672 |
+| Celery Worker -> Redis | RESP, redis-py | GET/RPUSH | 6379 |
+| Celery Worker -> OpenRouter | HTTPS | JSON | `https://openrouter.ai/api/v1` |
+| Response Sender -> MAX API | HTTPS | Bot API методы | актуальный endpoint по документации MAX/maxapi |
+
+Критическое ограничение: Response Sender не вызывает Celery; Celery Worker не вызывает MAX API.
+
+## 5. Зависимости между эпиками
+
+```text
+Эпик 1: Auth Service
+    ↓
+Эпик 2: Bot Service Core + Redis маппинг
+    ↓
+Эпик 3: Celery + OpenRouter + Outbox Producer
+    ↓
+Эпик 4: Response Sender + MAX интеграция
+    ↓
+Эпик 5: Тестирование, документация, инфраструктура
+```
+
+Эпик 5 выполняется параллельно по мере готовности модулей, но финальная приёмка зависит от завершения Эпиков 1-4.
+
+# Эпики
+
+## Эпик 1: Auth Service — регистрация, логин, выпуск JWT
+
+### Цель
+
+Создать независимый сервис аутентификации, который хранит пользователей, проверяет пароли и выпускает JWT-токены для Bot Service.
+
+### Технический дизайн
+
+1. Интерфейсы: REST API и Swagger.
+2. Схема данных: SQLite/Postgres, таблица `users`.
+3. Протоколы: HTTP/JSON и `OAuth2PasswordRequestForm` для `/auth/login`.
+4. Зависимости: база данных, общий `JWT_SECRET` для Bot Service.
+
+### Задача 1.1: Базовая структура и конфигурация
+
+Acceptance Criteria:
+
+- FastAPI-приложение запускается на `0.0.0.0:8000`.
+- Swagger доступен на `/docs`.
+- Переменные окружения читаются из `.env`.
+- В конфиге есть `JWT_SECRET`, `JWT_ALG`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `DATABASE_URL` или `SQLITE_PATH`.
+- Используется lifespan, не deprecated `@app.on_event`.
+
+Файлы:
+
+- `auth_service/app/main.py`
+- `auth_service/app/core/config.py`
+- `auth_service/.env.example`
+
+### Задача 1.2: Модели данных и репозиторий
+
+Acceptance Criteria:
+
+- Модель `User` содержит `id`, `email`, `password_hash`, `role`, `created_at`.
+- Email имеет уникальный индекс.
+- Используется асинхронный SQLAlchemy engine.
+- Репозиторий содержит `get_by_email`, `get_by_id`, `create`.
+- Репозиторий не импортирует FastAPI и не бросает HTTP-исключения.
+
+Файлы:
+
+- `auth_service/app/db/base.py`
+- `auth_service/app/db/session.py`
+- `auth_service/app/db/models.py`
+- `auth_service/app/repositories/users.py`
+
+### Задача 1.3: Безопасность и JWT
+
+Acceptance Criteria:
+
+- `hash_password()` и `verify_password()` реализованы через passlib/bcrypt.
+- `create_access_token()` формирует `sub`, `role`, `iat`, `exp`.
+- `decode_token()` валидирует подпись и срок действия.
+- Ошибки описаны в `core/exceptions.py`.
+
+Файлы:
+
+- `auth_service/app/core/security.py`
+- `auth_service/app/core/exceptions.py`
+
+### Задача 1.4: Usecase и эндпоинты
+
+Acceptance Criteria:
+
+- `POST /auth/register` создаёт пользователя и хеширует пароль.
+- `POST /auth/login` принимает `OAuth2PasswordRequestForm` и возвращает JWT.
+- `GET /auth/me` возвращает профиль по Bearer-токену.
+- Ошибки: 409 для дубля email, 401 для неверных credentials/токена, 404 для отсутствующего пользователя.
+- Эндпоинты тонкие: SQL и генерация токена не пишутся прямо в route-функциях.
+
+Файлы:
+
+- `auth_service/app/usecases/auth.py`
+- `auth_service/app/api/deps.py`
+- `auth_service/app/api/routes_auth.py`
+- `auth_service/app/api/router.py`
+
+### Задача 1.5: Тесты Auth Service
+
+Acceptance Criteria:
+
+- Модульные тесты хеширования и JWT.
+- Интеграционный flow: регистрация -> логин -> `/auth/me`.
+- Негативные тесты: дубль email, неверный пароль, запрос без токена.
+- Покрытие целевое: 80%+ для учебной приёмки.
+
+Файлы:
+
+- `auth_service/tests/test_security.py`
+- `auth_service/tests/test_api.py`
+- `auth_service/tests/conftest.py`
+- `auth_service/pytest.ini`
+
+Нефункциональные требования:
+
+- Нет секретов в коде.
+- Публичные схемы не содержат `password_hash`.
+- Поддержка SQLite; Postgres допускается через `DATABASE_URL`.
+
+Статус: в процессе.
+Приоритет: высокий.
+Оценка: 6-8 часов.
+
+## Эпик 2: Bot Service Core — MAX интеграция и Redis маппинг
+
+### Цель
+
+Создать Bot Service на maxapi, который принимает JWT через `/token`, сохраняет авторизационное состояние в Redis и отправляет валидные пользовательские запросы в Celery.
+
+### Технический дизайн
+
+1. Интерфейсы: `maxapi.Bot`, `maxapi.Dispatcher`, Redis state.
+2. Схема данных: `max_auth:*`, `user_chat:*`.
+3. Протоколы: MAX polling/webhook, Redis RESP, AMQP через Celery.
+4. Зависимость: общий `JWT_SECRET` с Auth Service.
+
+### Задача 2.1: Настройка Bot Service и maxapi
+
+Acceptance Criteria:
+
+- Переменные окружения: `MAX_BOT_TOKEN`, `JWT_SECRET`, `JWT_ALG`, `REDIS_URL`, `RABBITMQ_URL` или `CELERY_BROKER_URL`.
+- Режим работы: polling для dev, webhook для production.
+- `/health` доступен в FastAPI-приложении.
+- Webhook endpoint `/webhook` подключается через `maxapi[fastapi]`.
+- Для polling используется `Dispatcher.start_polling(bot)`, не `bot.infinity_polling()`.
+
+Файлы:
+
+- `bot_service/app/main.py`
+- `bot_service/app/poll.py`
+- `bot_service/app/core/config.py`
+- `bot_service/.env.example`
+
+### Задача 2.2: JWT validation
+
+Acceptance Criteria:
+
+- `decode_and_validate(token) -> dict`.
+- Проверяется подпись HS256.
+- Проверяется `exp`.
+- Payload содержит минимум `sub`; `role` берётся из токена или дефолтится в `user`.
+- Bot Service не создаёт JWT.
+
+Файлы:
+
+- `bot_service/app/core/jwt.py`
+
+### Задача 2.3: Redis client и двунаправленный маппинг
+
+Acceptance Criteria:
+
+- `get_redis()` возвращает singleton `redis.asyncio.Redis`.
+- `register_token(redis, max_user_id, jwt_payload)` записывает оба маппинга.
+- При новом `/token` удаляется старый `max_auth:<old_max_user_id>` для того же `sub`.
+- При новом `/token` в том же чате удаляется старый `user_chat:<old_sub>`.
+- `get_auth(redis, max_user_id) -> tuple[str, str] | None`.
+- `get_chat(redis, sub) -> str | None`.
+- TTL обоих ключей равен оставшемуся времени до `exp`.
+
+Файлы:
+
+- `bot_service/app/infra/redis.py`
+- `bot_service/app/core/constants.py`
+- `bot_service/app/services/auth_mapping.py`
+
+### Задача 2.4: Handlers MAX
+
+Acceptance Criteria:
+
+- `/token <JWT>` валидирует токен, вызывает `register_token()` и отвечает пользователю.
+- Текстовое сообщение без авторизации получает отказ в чате.
+- Текстовое сообщение с авторизацией вызывает `llm_request.delay(sub, role, prompt)`.
+- Хендлер не вызывает OpenRouter напрямую.
+- При ошибке Redis бот логирует ошибку и отвечает пользователю, что сервис временно недоступен; HTTP 503 для чат-сценария не используется.
+
+Файлы:
+
+- `bot_service/app/bot/dispatcher.py`
+- `bot_service/app/bot/handlers.py`
+- `bot_service/app/tasks/llm_tasks.py`
+
+### Задача 2.5: Тесты Bot Service Core
+
+Acceptance Criteria:
+
+- Тесты `decode_and_validate` с валидным и невалидным JWT.
+- Тесты `register_token` с fakeredis.
+- Тест `/token` handler без реального MAX API.
+- Тест обычного сообщения без токена.
+- Тест обычного сообщения с токеном и мокнутым `llm_request.delay`.
+- В тестах патчится `app.bot.handlers.get_redis`.
+
+Файлы:
+
+- `bot_service/tests/test_core/test_jwt.py`
+- `bot_service/tests/test_services/test_auth_mapping.py`
+- `bot_service/tests/test_handlers/test_handlers.py`
+- `bot_service/tests/conftest.py`
+- `bot_service/pytest.ini`
+
+Code review checklist:
+
+- Нет хардкода Redis-ключей вне `core/constants.py`.
+- TTL совпадает с `exp JWT`.
+- Инвалидация работает в обе стороны.
+- MAX API вызывается только из Bot Service: handlers и Response Sender.
+- Celery Worker не импортирует `maxapi`.
+
+Статус: в процессе.
+Приоритет: высокий.
+Оценка: 8-10 часов.
+
+## Эпик 3: Celery + OpenRouter + Outbox Producer
+
+### Цель
+
+Реализовать асинхронную обработку LLM-запросов через Celery, OpenRouter и Redis outbox.
+
+### Технический дизайн
+
+1. Celery получает задачу `llm_request(sub, role, prompt)`.
+2. Worker вызывает OpenRouter через синхронный `httpx.Client`.
+3. Worker получает актуальный `max_user_id` через `GET user_chat:<sub>`.
+4. Worker кладёт ответ в `max:outbox` через `RPUSH`.
+5. Worker не вызывает MAX API.
+
+### Задача 3.1: Celery и RabbitMQ
+
+Acceptance Criteria:
+
+- RabbitMQ обязателен как Celery broker.
+- Redis backend опционален и используется только для мониторинга/отладки.
+- Задачи регистрируются через `include=["app.tasks.llm_tasks"]` или autodiscover.
+- Worker запускается отдельно командой вида `celery -A app.infra.celery_app worker`.
+- Конфигурация берётся из `.env`.
+
+Файлы:
+
+- `bot_service/app/infra/celery_app.py`
+- `bot_service/app/tasks/llm_tasks.py`
+
+### Задача 3.2: OpenRouter client
+
+Acceptance Criteria:
+
+- `call_openrouter(prompt: str) -> str` или `call_openrouter_sync(prompt: str) -> str`.
+- Используется синхронный `httpx.Client`, так как Celery worker в v1 синхронный.
+- Заголовки: `Authorization: Bearer OPENROUTER_API_KEY`, `HTTP-Referer`, `X-Title`.
+- Модель задаётся через `OPENROUTER_MODEL`, по умолчанию `stepfun/step-3.5-flash:free`.
+- Таймаут настраиваемый, рекомендуемое значение для v1: 30-60 секунд.
+- Ошибки сети, 429 и 5xx обрабатываются и могут приводить к Celery retry.
+
+Файлы:
+
+- `bot_service/app/services/openrouter_client.py`
+- `bot_service/app/core/config.py`
+
+### Задача 3.3: Celery task `llm_request`
+
+Acceptance Criteria:
+
+- Сигнатура: `llm_request(sub: str, role: str, prompt: str) -> None`.
+- `task_id` берётся из Celery request id.
+- `max_user_id = GET user_chat:<sub>`.
+- Если `user_chat:<sub>` отсутствует, задача логирует событие и завершается без отправки.
+- Outbox item содержит `max_user_id`, `text`, `task_id`, `created_at`.
+- Выполняется `RPUSH max:outbox <JSON>`.
+
+Файлы:
+
+- `bot_service/app/tasks/llm_tasks.py`
+- `bot_service/app/models/outbox.py`
+
+### Задача 3.4: Интеграция с handlers
+
+Acceptance Criteria:
+
+- После проверки авторизации handler вызывает `llm_request.delay(sub, role, prompt)`.
+- Handler не блокируется на LLM.
+- В задачу не передаётся `max_user_id`.
+
+Файлы:
+
+- `bot_service/app/bot/handlers.py`
+
+### Задача 3.5: Тесты Celery и OpenRouter
+
+Acceptance Criteria:
+
+- OpenRouter тестируется через respx/мок HTTP без реального интернета.
+- `llm_request` тестируется с моками Redis и OpenRouter.
+- Проверяется успешный `RPUSH`.
+- Проверяется кейс отсутствующего `user_chat:<sub>`.
+- Проверяется retry/error path для 429/5xx, если retry реализован в v1.
+
+Файлы:
+
+- `bot_service/tests/test_services/test_openrouter_client.py`
+- `bot_service/tests/test_tasks/test_llm_tasks.py`
+- `bot_service/tests/conftest.py`
+
+Нефункциональные требования:
+
+- Воркер не импортирует `maxapi`.
+- HTTP-клиент закрывает соединения.
+- Ошибки OpenRouter логируются без утечки API key.
+- Размер `max:outbox` мониторится; ориентир alert threshold: 10000 элементов.
+
+Статус: в процессе.
+Приоритет: высокий.
+Оценка: 6-8 часов.
+
+## Эпик 4: Response Sender — доставка сообщений в MAX
+
+### Цель
+
+Реализовать фоновый consumer внутри Bot Service, который читает `max:outbox` и доставляет ответы пользователям в MAX.
+
+### Технический дизайн
+
+1. Consumer работает как `asyncio.Task`.
+2. Читает Redis LIST через `BLPOP max:outbox timeout=1.0`.
+3. `BLPOP` при timeout возвращает `None`; это штатный idle-loop.
+4. JSON элемента валидируется через Pydantic-модель `OutboxItem`.
+5. `max_user_id` хранится строкой, но для `Bot.send_message(chat_id=...)` приводится к `int`, если этого требует maxapi.
+
+### Задача 4.1: Outbox Consumer
+
+Acceptance Criteria:
+
+- Функция `outbox_consumer_loop(bot)` с бесконечным циклом.
+- Используется `BLPOP` с timeout.
+- `None` от `BLPOP` корректно обрабатывается.
+- Для каждого элемента выполняется JSON parse и `bot.send_message`.
+- Успехи и ошибки логируются.
+- Для v1 допустимо только логировать ошибку отправки; для production добавить retry/dead-letter.
+
+Файлы:
+
+- `bot_service/app/bot/outbox_consumer.py`
+- `bot_service/app/models/outbox.py`
+
+### Задача 4.2: Lifespan и polling lifecycle
+
+Acceptance Criteria:
+
+- В webhook-режиме consumer стартует в FastAPI lifespan.
+- При shutdown задача отменяется через `cancel()` и ожидается.
+- Redis соединение закрывается.
+- В polling-режиме consumer стартует рядом с `Dispatcher.start_polling(bot)`.
+- Не используется deprecated `@app.on_event`.
+
+Файлы:
+
+- `bot_service/app/main.py`
+- `bot_service/app/poll.py`
+
+### Задача 4.3: Идемпотентность и дедупликация
+
+Для учебного v1 эта задача опциональна. Для production включить обязательно при ретраях и повторной постановке сообщений в outbox.
+
+Acceptance Criteria для production:
+
+- Consumer проверяет `task_id` через Redis `SETNX`.
+- Если `task_id` уже обработан, сообщение пропускается.
+- TTL для processed markers: 1 час или значение из конфигурации.
+- Дедупликация не ломает повторную обработку сообщений без `task_id` в dev-режиме.
+
+Файлы:
+
+- `bot_service/app/bot/outbox_consumer.py`
+- `bot_service/app/core/config.py`
+
+### Задача 4.4: Ошибки и graceful shutdown
+
+Acceptance Criteria:
+
+- При SIGTERM/SIGINT consumer завершает текущую итерацию и закрывается.
+- Сообщения, не извлечённые из `max:outbox`, остаются в очереди.
+- Сообщение, уже извлечённое через `BLPOP`, в v1 при ошибке отправки логируется как failed.
+- Для production добавляется retry policy: максимум 3 попытки и dead-letter/retry queue.
+- При ошибках отправки сообщения не теряются молча: всегда есть лог с `task_id` и `max_user_id`.
+
+Файлы:
+
+- `bot_service/app/bot/outbox_consumer.py`
+- `bot_service/app/core/config.py`
+
+### Задача 4.5: Тесты Response Sender
+
+Acceptance Criteria:
+
+- Тест `BLPOP` с мокнутым Redis.
+- Проверка вызова `bot.send_message` с правильным `chat_id` и текстом.
+- Тест обработки `None` от `BLPOP`.
+- Тест ошибки `send_message` с логированием.
+- Тест отмены задачи через `asyncio.CancelledError`.
+- Тест дедупликации, если задача 4.3 входит в v1.
+
+Файлы:
+
+- `bot_service/tests/test_bot/test_outbox_consumer.py`
+- `bot_service/tests/conftest.py`
+
+Нефункциональные требования:
+
+- Consumer не блокирует handlers.
+- В нормальных условиях время от появления элемента в outbox до попытки отправки меньше 1 секунды.
+- При падении consumer бот может продолжать принимать входящие сообщения, но очередь outbox будет расти; это должно мониториться.
+
+Статус: в процессе.
+Приоритет: высокий.
+Оценка: 4-6 часов.
+
+## Эпик 5: Тестирование, документация и инфраструктура
+
+### Цель
+
+Собрать проект в проверяемый учебный контур: тесты, документация, Makefile, docker-compose и инструкции запуска.
+
+### Задача 5.1: Тестовая инфраструктура
+
+Acceptance Criteria:
+
+- В обоих сервисах есть `pytest.ini`.
+- Для async-тестов включён `asyncio_mode = auto`.
+- Redis мокается через fakeredis или через собственные fake-объекты.
+- Celery `.delay()` в handler-тестах мокается.
+- OpenRouter тестируется без реального интернета.
+
+Файлы:
+
+- `auth_service/pytest.ini`
+- `bot_service/pytest.ini`
+- `auth_service/tests/conftest.py`
+- `bot_service/tests/conftest.py`
+
+### Задача 5.2: Документация запуска
+
+Acceptance Criteria:
+
+- В README описаны режимы MAX: polling и webhook.
+- Объяснено, что polling и webhook не используются одновременно.
+- Описаны переменные окружения.
+- Описан flow: register -> login -> `/token` -> вопрос LLM.
+- Описана архитектурная граница: Celery Worker не знает MAX.
+
+Файлы:
+
+- `README.md`
+- `project/services/auth_service/README.md`
+- `project/services/bot_service/README.md`
+- `Разработка/Arch.txt`
+
+### Задача 5.3: Docker compose
+
+Acceptance Criteria:
+
+- Поднимаются Redis и RabbitMQ.
+- Поднимается Auth Service.
+- Поднимается Bot Service в выбранном режиме.
+- Celery worker запускается отдельным контейнером.
+- `.env.auth.example` и `.env.bot.example` не содержат секретов.
+
+Файлы:
+
+- `project/docker-compose.yml`
+- `project/services/auth_service/Dockerfile`
+- `project/services/bot_service/Dockerfile`
+- `project/.env.auth.example`
+- `project/.env.bot.example`
+
+### Задача 5.4: Makefile и команды разработчика
+
+Acceptance Criteria:
+
+- Команды запуска работают из корня репозитория.
+- Есть `run-auth`, `run-max-poll`, `run-max-webhook`, `test`, `lint`, `format`, `clean`.
+- Для Windows clean использует PowerShell-compatible команды.
+
+Файлы:
+
+- `Makefile`
+
+## Итоговое архитектурное решение
+
+Архитектура утверждена.
+
+Обязательные архитектурные инварианты:
+
+- Auth Service выпускает JWT и не знает о MAX.
+- Bot Service не хранит пользователей и не обращается к БД Auth Service.
+- Bot Service валидирует JWT локально по секрету/алгоритму.
+- Redis хранит только производное состояние авторизации, не JWT целиком.
+- Celery Worker вызывает OpenRouter и пишет ответ в `max:outbox`.
+- Celery Worker не импортирует `maxapi` и не вызывает MAX Bot API.
+- Response Sender внутри Bot Service читает `max:outbox` через `BLPOP` и отправляет сообщения в MAX.
+- RabbitMQ реально используется как брокер задач.
+- Redis реально используется для state mapping и outbox.
+
+Эта версия спецификации согласована с `ТЗ_МАКС.txt` при зафиксированном отклонении: вместо базового ключа `token:<id>` используется более строгая схема `max_auth:<max_user_id>` + `user_chat:<sub>`, а задача LLM получает `(sub, role, prompt)`.
