@@ -1,0 +1,22 @@
+План реализации: Goods (пайплайн классификации товаров)
+=======================================================
+
+ТЗ: аудит → transforms → текст → Dataset → DataLoader → вердикт.
+Обучение модели НЕ требуется. «Эксперименты» = 6 конфигураций пайплайна.
+
+Данные
+------
+wget https://code.s3.yandex.net/thefirstprofession/nod/fashion_project_dataset.zip
+DATA_ROOT = p3_Goods/Разработка/data_goods/fashion_project_dataset
+
+Этап | Пункт                              | Где
+-----+------------------------------------+----------------------------------
+1    | Аудит metadata / class_to_idx / img| Goods_cpu_pipeline.ipynb
+2    | train/val/test transforms          | get_transforms(cfg)
+3    | Текст: словарь только train        | build_vocab / encode
+4    | FashionDataset                     | класс Dataset
+5    | DataLoader + проверка батча        | shapes + viz
+6    | Инженерный вывод                   | markdown
+
+6 конфигов пайплайна: G1–G6 (size, max_len, aug, batch, normalize).
+Служебный: Goods_Colab.ipynb (wget + Run all с best).

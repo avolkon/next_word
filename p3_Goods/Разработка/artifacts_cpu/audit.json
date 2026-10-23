@@ -1,0 +1,46 @@
+{
+  "n_rows": 1200,
+  "columns": [
+    "id",
+    "split",
+    "class_name",
+    "label",
+    "image_path",
+    "productDisplayName",
+    "gender",
+    "masterCategory",
+    "subCategory",
+    "articleType",
+    "baseColour",
+    "season",
+    "year",
+    "usage"
+  ],
+  "split_counts": {
+    "train": 840,
+    "val": 180,
+    "test": 180
+  },
+  "class_counts": {
+    "test|Handbags": 45,
+    "test|Shirts": 45,
+    "test|Sports Shoes": 45,
+    "test|Watches": 45,
+    "train|Handbags": 210,
+    "train|Shirts": 210,
+    "train|Sports Shoes": 210,
+    "train|Watches": 210,
+    "val|Handbags": 45,
+    "val|Shirts": 45,
+    "val|Sports Shoes": 45,
+    "val|Watches": 45
+  },
+  "missing_files": 0,
+  "bad_images": 0,
+  "empty_names": 0,
+  "c2i_ok": "True",
+  "label_mismatch": 0,
+  "img_w_mean": 59.994166666666665,
+  "img_h_mean": 79.98333333333333,
+  "ok": true
+}

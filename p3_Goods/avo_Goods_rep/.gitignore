@@ -1,0 +1,4 @@
+# при желании не коммитить весь images/ (локально остаётся)
+# data/images/
+.ipynb_checkpoints/
+__pycache__/

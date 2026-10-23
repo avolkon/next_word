@@ -1,0 +1,65 @@
+{
+  "config": "G3",
+  "vocab_size": 754,
+  "batch_image_shape": [
+    8,
+    3,
+    224,
+    224
+  ],
+  "batch_text_shape": [
+    8,
+    24
+  ],
+  "batch_label_shape": [
+    8
+  ],
+  "shapes_ok": true,
+  "item_ok": true,
+  "recognizable": true,
+  "score": 25,
+  "image_size": 224,
+  "max_text_len": 24,
+  "batch_size": 8,
+  "strong_aug": false,
+  "imagenet_norm": true,
+  "n_train": 840,
+  "n_val": 180,
+  "n_test": 180,
+  "sample_name": "ADIDAS Men Duramo 4M Grey Sports Shoes",
+  "sample_tokens": [
+    "adidas",
+    "men",
+    "duramo",
+    "4m",
+    "grey",
+    "sports",
+    "shoes"
+  ],
+  "sample_ids": [
+    58,
+    426,
+    216,
+    25,
+    304,
+    632,
+    602,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}

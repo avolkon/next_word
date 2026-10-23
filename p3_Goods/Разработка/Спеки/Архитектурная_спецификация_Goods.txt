@@ -1,0 +1,22 @@
+Архитектурная спецификация Goods — пайплайн данных
+==================================================
+
+Задача: воспроизводимый Dataset/DataLoader для мультимодальной классификации
+(image + productDisplayName → label). Без обучения классификатора в этом модуле.
+
+Классы: Handbags=0, Shirts=1, Sports Shoes=2, Watches=3
+Объём: 1200 images (840/180/180)
+
+Конфиги эксперимента (CPU)
+--------------------------
+G1: size=128, max_len=16, weak aug, batch=8, ImageNet norm
+G2: size=224, max_len=16, weak aug, batch=8, ImageNet norm
+G3: size=224, max_len=24, weak aug, batch=8, ImageNet norm
+G4: size=224, max_len=16, strong aug, batch=8, ImageNet norm
+G5: size=224, max_len=16, weak aug, batch=16, ImageNet norm
+G6: size=224, max_len=16, weak aug, batch=8, no ImageNet norm
+
+Критерий best: 0 битых путей; формы [B,3,H,W], [B,L], [B];
+товар узнаваем после aug; словарь только по train.
+
+SEED=42

@@ -1,0 +1,9 @@
+# тяжёлые / служебные
+*.pt
+*.pth
+Разработка/data_goods/*.zip
+__pycache__/
+.ipynb_checkpoints/
+_commit_prep.py
+_build_*.py
+artifacts/
