@@ -1,0 +1,32 @@
+План реализации: Nutrition (предсказание калорий)
+=================================================
+
+Цель: MAE < 50 на test. Мультимодальная регрессия (фото + текст ингредиентов).
+Стиль: как Autotext — линейный ноутбук + scripts/dataset.py + scripts/utils.py.
+
+Данные
+------
+DATA_ROOT = p2_Nutrition/Разработка/data_nutrition
+dish.csv: 2755 train / 507 test
+ingredients.csv: 555 ингредиентов
+images/{dish_id}/rgb.png
+
+Этап | Пункт ТЗ                         | Где закрывается
+-----+----------------------------------+------------------------------------------
+1    | EDA + merge + id→имена           | Nutrition_cpu_experiments.ipynb / Colab
+1    | Видение подходов и метрик        | markdown после EDA
+2    | dataset.py                       | scripts/dataset.py
+2    | utils.py (model, train, seed)    | scripts/utils.py
+2    | cfg + раздельные LR AdamW        | Config в utils / ячейка констант
+3    | Обучение, BATCH_SIZE=4 (full)    | CPU: срез; Colab: full GPU
+3    | L1Loss, head Linear→1            | MultimodalCalorieModel
+3    | Чекпоинт по пути cfg             | cfg.CHECKPOINT_PATH
+4    | Инференс test MAE                | ноутбук
+4    | Топ-5 ошибок с фото              | ноутбук
+
+Профили
+-------
+cpu_small — 200/50/50, 3–5 эпох, MobileNetV3-small + bert-tiny, batch=2
+full      — весь датасет, EfficientNet-B0 + DistilBERT, batch=4, GPU Colab
+
+Служебный стоп: Nutrition_full_Colab.ipynb после выбора best_config на CPU.

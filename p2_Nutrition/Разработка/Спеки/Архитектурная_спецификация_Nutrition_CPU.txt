@@ -1,0 +1,40 @@
+Архитектурная спецификация Nutrition — профиль CPU (cpu_small)
+==============================================================
+
+CONFIG = "cpu_small"
+Назначение: ≥6 конфигураций гиперпараметров на малом срезе до Colab full.
+
+Данные
+------
+DATA_ROOT: Разработка/data_nutrition
+Срез (seed=42): train≈200, val≈50 (из train), test≈50 (из test)
+IMAGE_SIZE: 128 (эксперимент C5: 160)
+Аугментации train: HorizontalFlip, ColorJitter (вкл/выкл в C4)
+
+Модель
+------
+Image: timm mobilenetv3_small_100, pretrained
+Text:  distilbert-base-uncased (freeze на CPU; bert-tiny tokenizer недоступен в окружении)
+Projection: Linear → HIDDEN_DIM, ReLU
+Head: Linear(2*HIDDEN_DIM, 1) без активации
+Loss: nn.L1Loss (MAE)
+Optimizer: AdamW раздельные группы TEXT_LR / IMAGE_LR / CLASSIFIER_LR
+
+Гиперпараметры базовые (C1)
+---------------------------
+BATCH_SIZE=2, EPOCHS=4, HIDDEN_DIM=128
+TEXT_LR=2e-5, IMAGE_LR=2e-5, CLASSIFIER_LR=1e-3
+FREEZE_TEXT=True, FREEZE_IMAGE=True
+WEIGHT_DECAY=1e-4, SEED=42
+
+Шесть конфигов
+--------------
+C1 baseline freeze
+C2 unfreeze text last + выше TEXT_LR
+C3 unfreeze image last
+C4 без аугментаций
+C5 IMAGE_SIZE=160
+C6 HIDDEN_DIM=256, CLASSIFIER_LR=5e-4
+
+Метрика выбора: val MAE (ниже лучше), контроль test MAE.
+Критерий продукта (full): MAE < 50 — на cpu_small ожидаем выше; цель — относительный рейтинг конфигов.

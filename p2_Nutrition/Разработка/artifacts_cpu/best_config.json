@@ -1,0 +1,13 @@
+{
+  "config": "C7_noaug_160",
+  "val_mae": 153.6,
+  "test_mae": 120.17,
+  "best_epoch": 4,
+  "trainable_params": 229889,
+  "sec_per_epoch": 11.8,
+  "image_size": 160,
+  "hidden_dim": 128,
+  "use_aug": false,
+  "unfreeze_text_last": false,
+  "unfreeze_image_last": false
+}

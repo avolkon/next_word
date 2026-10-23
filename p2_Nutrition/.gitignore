@@ -1,0 +1,8 @@
+# тяжёлые артефакты / архив (локально)
+*.pt
+*.pth
+Разработка/nutrition.zip
+Разработка/artifacts_cpu/*.pt
+__pycache__/
+.ipynb_checkpoints/
+artifacts/

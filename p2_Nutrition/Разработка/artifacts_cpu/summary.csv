@@ -1,0 +1,8 @@
+config,val_mae,test_mae,best_epoch,trainable_params,sec_per_epoch,image_size,hidden_dim,use_aug,unfreeze_text_last,unfreeze_image_last
+C7_noaug_160,153.6,120.17,4,229889,11.8,160,128,False,False,False
+C4_no_aug,153.65,125.89,4,229889,13.4,128,128,False,False,False
+C5_size160,154.26,123.54,4,229889,13.4,160,128,True,False,False
+C1_baseline,155.93,125.67,4,229889,12.7,128,128,True,False,False
+C2_text_unfreeze,158.62,127.09,4,229889,12.8,128,128,True,True,False
+C6_hidden256,164.07,133.71,4,459777,13.8,128,256,True,False,False
+C3_image_unfreeze,166.71,129.75,4,1411537,16.6,128,128,True,False,True

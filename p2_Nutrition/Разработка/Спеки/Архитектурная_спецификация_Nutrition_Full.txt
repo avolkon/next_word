@@ -1,0 +1,29 @@
+Архитектурная спецификация Nutrition — профиль Full (Colab GPU)
+===============================================================
+
+CONFIG = "full"
+Назначение: служебный прогон на полном датасете после выбора best с CPU.
+
+Данные
+------
+Весь train/test из dish.csv (2755 / 507)
+Валидация: 10% от train (seed=42), остальное train
+IMAGE_SIZE: из best_config (128 или 160)
+BATCH_SIZE=4 (требование ТЗ)
+
+Модель (стартовый full; уточняется best CPU)
+--------------------------------------------
+Image: timm efficientnet_b0, pretrained, partial unfreeze
+Text:  distilbert-base-uncased
+HIDDEN_DIM: из best (128 или 256)
+Loss: L1Loss, head → 1
+AdamW: TEXT_LR / IMAGE_LR / CLASSIFIER_LR раздельно
+EPOCHS=12, PATIENCE=3 по val MAE
+CHECKPOINT_PATH=/content/nutrition_artifacts/best.pt
+
+Colab-обвязка
+-------------
+DATA_ROOT=/content/data_nutrition (upload/zip/copy)
+Логи MAE в stdout
+Топ-5 ошибок test: фото, ингредиенты, y, ŷ
+Артефакты: best.pt, summary.csv — для переноса цифр в сдачу (не git)
