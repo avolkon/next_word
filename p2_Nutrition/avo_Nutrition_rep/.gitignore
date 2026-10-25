@@ -1,6 +1,9 @@
 # тяжёлые картинки и zip остаются локально
+data/images/
 nutrition/images/
 nutrition.zip
+data.zip
 artifacts/*.pt
 __pycache__/
+scripts/__pycache__/
 .ipynb_checkpoints/

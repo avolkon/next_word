@@ -1,0 +1,9 @@
+torch
+timm
+albumentations
+transformers
+torchmetrics
+pillow
+pandas
+matplotlib
+numpy
