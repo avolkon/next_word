@@ -1,5 +1,6 @@
-# тяжёлые картинки остаются локально (~1.4 GB)
-data/images/
+# тяжёлые картинки и zip остаются локально
+nutrition/images/
+nutrition.zip
 artifacts/*.pt
 __pycache__/
 .ipynb_checkpoints/

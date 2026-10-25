@@ -6,15 +6,15 @@
 
 ```text
 .
-├── data/                         # dish.csv, ingredients.csv, images/
-├── avo_m25_555_nutrition.ipynb   # монолитный ноутбук (этапы 1–4 ТЗ)
+├── nutrition/                    # dish.csv, ingredients.csv, images/
+├── nutrition.zip                 # опционально (вместо/вместе с папкой)
+├── avo_m25_555_nutrition.ipynb
 └── README.md
 ```
 
 ## Запуск
 
-Откройте `avo_m25_555_nutrition.ipynb` **из этой папки** и выполните сверху вниз (для обучения желателен GPU).
+Откройте `avo_m25_555_nutrition.ipynb` **из этой папки** и выполните сверху вниз.
 
-Данные: ячейка 0.2 сначала ищет `data/` рядом с ноутбуком; если нет — предложит выбрать папку на диске (локально) или Upload `nutrition.zip` (Colab).
-
-Все этапы ТЗ — внутри ноутбука, без внешних `.py` проекта.
+Данные: ячейка 0.2 ищет папку **`nutrition/`** или файл **`nutrition.zip`** рядом с ноутбуком;
+если нет — диалог выбора папки (локально) или Upload `nutrition.zip` (Colab).
